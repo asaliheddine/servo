@@ -174,6 +174,7 @@ use std::process;
 use std::rc::{Rc, Weak};
 use std::sync::{Arc, Mutex};
 use std::thread;
+use std::time::Duration;
 use style_traits::viewport::ViewportConstraints;
 use style_traits::CSSPixel;
 use webgpu::{self, WebGPU, WebGPURequest};
@@ -954,12 +955,37 @@ where
 
     /// The main event loop for the constellation.
     fn run(&mut self) {
-        while !self.shutting_down || !self.pipelines.is_empty() {
+        while !self.shutting_down {
             // Randomly close a pipeline if --random-pipeline-closure-probability is set
             // This is for testing the hardening of the constellation.
             self.maybe_close_random_pipeline();
             self.handle_request();
         }
+
+        // Try to cleanly exit all pipelines, until a timeout hits.
+        let pipeline_exit_timeout = after(Duration::from_millis(200));
+        loop {
+            if self.pipelines.is_empty() {
+                break;
+            }
+            select! {
+                recv(self.script_receiver) -> msg => {
+                    match msg.expect("Unexpected script channel panic in constellation") {
+                        Ok((source_pipeline_id, FromScriptMsg::PipelineExited)) => {
+                            self.handle_pipeline_exited(source_pipeline_id);
+                        },
+                        _ => continue,
+                    }
+                }
+                recv(pipeline_exit_timeout) -> _ => {
+                    if !self.pipelines.is_empty() {
+                        warn!("Failed to exit a number of pipelines {:?}", self.pipelines.len());
+                    }
+                    break;
+                },
+            }
+        }
+
         self.handle_shutdown();
     }
 
